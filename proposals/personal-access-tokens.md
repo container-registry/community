@@ -36,6 +36,8 @@ Users need a self-service way to create, rotate, and revoke authentication crede
 **2. Token Format & Security**
 - Format: `hbr_pat_` prefix + 32-character random secret
 - Secrets hashed using PBKDF2-SHA256 with per-token salt
+- Hash format: `v1:sha256:100000:salt:hash` (version:algorithm:iterations:salt:hash)
+- Default iterations: 100,000 (configurable; minimum 10,000)
 - Secrets never stored in plaintext; returned only on creation
 - Disabled and expired tokens are rejected during authentication
 
@@ -49,10 +51,14 @@ Users need a self-service way to create, rotate, and revoke authentication crede
 - PATs support project-level scope enforcement via JSON scope field
 - Scope validated through existing Harbor authorization layer (RAM)
 - Token access restricted to permitted projects only
+- **Deny-by-default**: NULL or invalid scope grants no project access
+- Scope validation performed before any project-specific operation
+- Legacy tokens with no scope default to empty scope (no project access)
 
 **5. Audit Trail**
-- All PAT operations logged: create, read, update, delete, usage
-- `last_used_at` provides audit trail of token usage
+- All PAT operations logged: create, read, update, delete (via Harbor audit log)
+- `last_used_at` tracks most recent authentication timestamp (last-use tracking)
+- Full audit trail requires integration with existing Harbor audit log system for detailed usage history
 - Compatible with Harbor's audit log system
 
 ### Database Schema
@@ -63,7 +69,7 @@ CREATE TABLE personal_access_token (
     user_id INT NOT NULL REFERENCES harbor_user(user_id),
     name VARCHAR(255) NOT NULL,
     description TEXT,
-    secret VARCHAR(7168) NOT NULL,  -- PBKDF2-SHA256 hash with salt
+    secret VARCHAR(255) NOT NULL,   -- PBKDF2-SHA256 hash with salt
     salt VARCHAR(255) NOT NULL,
     expires_at BIGINT DEFAULT -1,   -- Unix timestamp, -1 = never expire
     creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -74,6 +80,19 @@ CREATE TABLE personal_access_token (
     scope JSONB,
     UNIQUE(user_id, name)
 );
+
+CREATE OR REPLACE FUNCTION update_pat_update_time()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.update_time = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trig_pat_update_time
+    BEFORE UPDATE ON personal_access_token
+    FOR EACH ROW
+    EXECUTE FUNCTION update_pat_update_time();
 
 CREATE INDEX idx_pat_user_id ON personal_access_token(user_id);
 CREATE INDEX idx_pat_disabled ON personal_access_token(disabled);
@@ -109,7 +128,7 @@ CREATE INDEX idx_pat_expires_at ON personal_access_token(expires_at);
 **Backward compatible:**
 - Existing user credentials (username/password) continue to work
 - Existing robot accounts continue to work
-- Existing OIDC CLI secrets migrated to legacy PATs on startup
+- OIDC CLI secrets stored in `harbor_user` table and migrated to legacy PATs on first use
 - No configuration changes required
 - Additive API endpoints only; no breaking changes
 
@@ -178,7 +197,7 @@ All passing:
 - **Project-Level Scope**: Per-repository or per-action granularity (pull vs push) requires future schema expansion
 - **No Secret Retrieval**: Secrets cannot be retrieved after creation; users must refresh if lost
 - **No Expiration Notifications**: Expired tokens silently rejected; no automatic warnings
-- **In-Memory Migration**: Legacy CLI tokens auto-migrated on first UI load; no background rotation
+- **Legacy Token Migration**: OIDC CLI secrets migrated on first authentication attempt (stored in user table)
 
 ## Potential Future Enhancements
 
