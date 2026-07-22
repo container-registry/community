@@ -67,9 +67,10 @@ Match(ctx) → (bool, error)
 ```
 1. Try OIDC
    ✓ Success → return user
-   ✗ Fail → continue
+   ✗ ErrAuth (locked user / invalid credentials) → reject login (terminal)
+   ✗ ErrProviderUnavailable (IdP unreachable / misconfigured) → continue to fallback
 2. Try Database (fallback)
-   ✓ Success → return user (admin always accessible)
+   ✓ Success → return user (local admin only; external users rejected)
    ✗ Fail → reject login
 ```
 
@@ -104,20 +105,21 @@ Match(ctx) → (bool, error)
 **Registry Proxy User Credential Passthrough:**
 - Probe upstream registry to detect auth method (Bearer or Basic)
 - Exchange user credentials for scoped Bearer token via token service
-- Cache tokens per-repository scope (not globally; prevents privilege escalation)
-- Fall back to probed credentials for unauthenticated requests
+- Cache tokens by authenticated principal, upstream service/registry, repository scope, and exact action set (never share across users or registries; prevents privilege escalation)
+- Unauthenticated requests: use separately authorized service-account path or forward no credentials and preserve upstream challenge (never inherit per-user cached tokens)
 - Handle token service failures gracefully
 
 ### Registry Proxy Auth Probe
 
 ```
-GET /v2/ with no credentials
+GET /v2/<repository> with no credentials (probe the requested resource, not generic /v2/)
   ↓
+Capture and preserve any WWW-Authenticate header from response
 If 401 + Bearer realm header:
   → Use token service exchange for Bearer tokens
 If 401 + Basic realm header:
   → Use Basic auth passthrough
-If 200 (no auth required):
+If 200 (no auth required for this specific repository):
   → Allow anonymous access
 ```
 
@@ -217,7 +219,6 @@ This was originally proposed upstream to goharbor/harbor as a single 16-commit P
 ## Known Limitations
 
 - **Token cache in-memory only**: Distributed deployments re-exchange tokens per instance; future: distributed cache support
-- **Per-scope tokens only**: Repository-level granularity not yet supported; future work for per-action (pull/push/delete) scoping
 - **No auto-fallback config**: Operators must explicitly set `auth_mode = "oidc"` for fallback; no automatic selection
 - **Token service errors**: Registry proxy degrades to Basic challenge on token service failure; tokens not cached
 
